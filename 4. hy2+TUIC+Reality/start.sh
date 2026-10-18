@@ -1,16 +1,11 @@
 #!/bin/bash
-set -e
 
 # ================== 端口设置 ==================
-
-export TUIC_PORT=${TUIC_PORT:-""}                     # 填入tuic节点端口
-
-export HY2_PORT=${HY2_PORT:-""}                       # 填入hy2节点端口
-
-export REALITY_PORT=${REALITY_PORT:-""}               # 填入reality节点端口（UDP/TCP可以共用1个端口）
-
+# 环境变量没填时，使用默认值防止脚本报错
+export TUIC_PORT=${TUIC_PORT:-""}       
+export HY2_PORT=${HY2_PORT:-""}         
+export REALITY_PORT=${REALITY_PORT:-""} 
 # ==============================================
-
 
 cd "$(dirname "$0")"
 export FILE_PATH="${PWD}/.npm"
@@ -21,6 +16,7 @@ export XDG_CACHE_HOME="/tmp/.singbox_cache"
 export TMPDIR="/tmp"
 rm -rf "${FILE_PATH}"/sb_* ~/.npm/_logs/* ./npm-debug.log* "${DATA_PATH}"/* /tmp/.singbox_* 2>/dev/null || true
 
+# ---------- UUID 处理 ----------
 UUID_FILE="${FILE_PATH}/uuid.txt"
 if [ -f "$UUID_FILE" ]; then
   UUID=$(cat "$UUID_FILE")
@@ -34,7 +30,7 @@ fi
 
 [ ! -d "${FILE_PATH}" ] && mkdir -p "${FILE_PATH}"
 
-# 自动通过 API 获取最新的 release 版本号（剥离 v 前缀），若 API 受限则以 1.11.4 保底
+# ---------- 获取 Sing-box 版本 ----------
 SINGBOX_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
 if [ -z "$SINGBOX_VER" ]; then
   SINGBOX_VER="1.11.4"
@@ -67,9 +63,10 @@ download_file() {
   fi
 }
 
+# ---------- 下载核心 ----------
 SINGBOX_BIN="${FILE_PATH}/sb_core"
 if [ ! -f "$SINGBOX_BIN" ]; then
-  echo -e "\e[1;33m[下载] 未检测到 Sing-box 核心，正在下载最新版本 v${SINGBOX_VER}...\e[0m"
+  echo -e "\e[1;33m[下载] 未检测到 Sing-box 核心，正在下载 v${SINGBOX_VER}...\e[0m"
   download_file "$DOWNLOAD_URL" "${FILE_PATH}/singbox.tar.gz"
   tar -zxvf "${FILE_PATH}/singbox.tar.gz" -C "${FILE_PATH}" --strip-components=1 "sing-box-${SINGBOX_VER}-linux-"*/sing-box >/dev/null 2>&1 || \
   tar -zxvf "${FILE_PATH}/singbox.tar.gz" -C "${FILE_PATH}" --wildcards "*/sing-box" --strip-components=1 >/dev/null 2>&1
@@ -80,6 +77,7 @@ else
   echo -e "\e[1;32m[核心] 已存在 Sing-box 核心，跳过下载\e[0m"
 fi
 
+# ---------- 生成 Reality 密钥 ----------
 if [ "$REALITY_PORT" != "" ] && [ "$REALITY_PORT" != "0" ]; then
   KEY_FILE="${FILE_PATH}/key.txt"
   if [ -f "$KEY_FILE" ]; then
@@ -97,8 +95,38 @@ if [ "$REALITY_PORT" != "" ] && [ "$REALITY_PORT" != "0" ]; then
   fi
 fi
 
+# ---------- 生成通用自签证书 (带 SAN) ----------
+if [ -f "${FILE_PATH}/cert.pem" ] && command -v openssl >/dev/null 2>&1; then
+  if ! openssl x509 -in "${FILE_PATH}/cert.pem" -noout -text 2>/dev/null | grep -q "DNS:www.bing.com"; then
+    echo -e "\e[1;33m[证书] 检测到旧版无 SAN 证书，重新生成...\e[0m"
+    rm -f "${FILE_PATH}/cert.pem" "${FILE_PATH}/private.key"
+  fi
+fi
+
 if [ ! -f "${FILE_PATH}/cert.pem" ] || [ ! -f "${FILE_PATH}/private.key" ]; then
-  if ! command -v openssl >/dev/null 2>&1; then
+  if command -v openssl >/dev/null 2>&1; then
+    echo -e "\e[1;33m[证书] 生成通用自签证书（含 SAN）...\e[0m"
+    openssl genrsa -out "${FILE_PATH}/private.key" 2048 2>/dev/null
+    cat > "${FILE_PATH}/openssl.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = v3_req
+prompt = no
+[dn]
+CN = www.bing.com
+[v3_req]
+subjectAltName = @alt_names
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+[alt_names]
+DNS.1 = www.bing.com
+DNS.2 = bing.com
+EOF
+    openssl req -new -x509 -days 3650 -key "${FILE_PATH}/private.key" -out "${FILE_PATH}/cert.pem" -config "${FILE_PATH}/openssl.cnf" 2>/dev/null
+    echo -e "\e[1;32m[证书] 已生成：CN=www.bing.com，SAN=www.bing.com\e[0m"
+  else
+    echo -e "\e[1;31m[警告] 环境无 openssl，将使用硬编码备用证书！\e[0m"
     cat > "${FILE_PATH}/private.key" <<'EOF'
 -----BEGIN EC PARAMETERS-----
 BgqghkjOPQQBw==
@@ -114,20 +142,24 @@ EOF
 MIIBejCCASGgAwIBAgIUFWeQL3556PNJLp/veCFxGNj9crkwCgYIKoZIzj0EAwIw
 EzERMA8GA1UEAwwIYmluZy5jb20wHhcNMjUwMTAxMDEwMTAwWhcNMzUwMTAxMDEw
 MTAwWjATMREwDwYDVQQDDAhiaW5nLmNvbTBNBgqgGzM9AgEGCCqGSM49AwEHA0IA
-BNZB2nz49O6yRvh26B9npACOK/nuky9/BlgEgDZ54Ga3qEAxdeWv07Mi8h
-d5IR8Um3oR/zQRIx7UmRmg4TKmjUzBRMB0GA1UdDgQWBQTV1cFID7UISE7PLTBR
-BfGbgrkMNzAfBgNVHSMEGDAWgBTV1cFID7UISE7PLTBRBfGbgrkMNzAPBgNVHRMB
-Af8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIARDAJvg0vd/ytrQVvEcSm6XTlB+
-eQ6OFb9LbLYL9Zi+AiffoMbi4y/0YUQlTtz7as9S8/lciBF5VCUoVIKS+vX2g==
+BNZB2nz49O6yRvh26B9npACOK/nuky9/BlgEgDZ54Ga3qEAxdeWv07Mi8hd5IR8Um
+3oR/zQRIx7UmRmg4TKmjUzBRMB0GA1UdDgQWBQTV1cFID7UISE7PLTBRBfGbgrkM
+NzAfBgNVHSMEGDAWgBTV1cFID7UISE7PLTBRBfGbgrkMNzAPBgNVHRMBAf8EBTAD
+AQH/MAoGCCqGSM49BAMCA0cAMEQCIARDAJvg0vd/ytrQVvEcSm6XTlB+eQ6OFb9L
+bLYL9Zi+AiffoMbi4y/0YUQlTtz7as9S8/lciBF5VCUoVIKS+vX2g==
 -----END CERTIFICATE-----
 EOF
-  else
-    openssl ecparam -genkey -name prime256v1 -out "${FILE_PATH}/private.key" 2>/dev/null
-    openssl req -new -x509 -days 3650 -key "${FILE_PATH}/private.key" -out "${FILE_PATH}/cert.pem" -subj "/CN=bing.com" 2>/dev/null
   fi
   chmod 600 "${FILE_PATH}/private.key"
 fi
 
+# ---------- 计算证书的纯十六进制指纹 (SHA-256) ----------
+CERT_HEX=""
+if command -v openssl >/dev/null 2>&1; then
+  CERT_HEX=$(openssl x509 -in "${FILE_PATH}/cert.pem" -outform der 2>/dev/null | openssl dgst -sha256 | awk '{print $2}')
+fi
+
+# ---------- 生成配置 ----------
 INBOUNDS=()
 
 if [ -n "$TUIC_PORT" ] && [ "$TUIC_PORT" != "0" ]; then
@@ -182,23 +214,35 @@ cat > "${FILE_PATH}/config.json" <<EOF
 }
 EOF
 
+# ---------- 启动 Sing-box ----------
 "$SINGBOX_BIN" run -c "${FILE_PATH}/config.json" >/dev/null 2>&1 &
 SINGBOX_PID=$!
 echo "[SING-BOX] 启动完成 PID=$SINGBOX_PID"
 
-IP=$(curl -s --max-time 2 ipv4.ip.sb || curl -s --max-time 1 api.ipify.org || echo "IP_ERROR")
-ISP=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F'"' '{print $26"-"$18}' || echo "0.0")
+# ---------- 获取 IP 与 生成订阅 ----------
+IP=$(curl -s --max-time 3 ipv4.ip.sb || curl -s --max-time 2 api.ipify.org || echo "IP_ERROR")
 
-# ================== 生成订阅 ==================
 > "${FILE_PATH}/list.txt"
-[ "$TUIC_PORT" != "" ] && [ "$TUIC_PORT" != "0" ] && echo "tuic://${UUID}:admin@${IP}:${TUIC_PORT}?sni=www.bing.com&alpn=h3&congestion_control=bbr&allowInsecure=1#tuic_easyshare" >> "${FILE_PATH}/list.txt"
-[ "$HY2_PORT" != "" ] && [ "$HY2_PORT" != "0" ] && echo "hysteria2://${UUID}@${IP}:${HY2_PORT}/?sni=www.bing.com&insecure=1#hy2_easyshare" >> "${FILE_PATH}/list.txt"
-[ "$REALITY_PORT" != "" ] && [ "$REALITY_PORT" != "0" ] && echo "vless://${UUID}@${IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.nazhumi.com&fp=firefox&pbk=${public_key}&type=tcp#reality_easyshare" >> "${FILE_PATH}/list.txt"
+
+# 使用 pinSHA256 传入十六进制指纹，并去除 insecure 参数
+if [ -n "$TUIC_PORT" ] && [ "$TUIC_PORT" != "0" ]; then
+  echo "tuic://${UUID}:admin@${IP}:${TUIC_PORT}?sni=www.bing.com&alpn=h3&congestion_control=bbr${CERT_HEX:+&pinSHA256=${CERT_HEX}}#tuic_easyshare" >> "${FILE_PATH}/list.txt"
+fi
+
+if [ -n "$HY2_PORT" ] && [ "$HY2_PORT" != "0" ]; then
+  echo "hysteria2://${UUID}@${IP}:${HY2_PORT}/?sni=www.bing.com${CERT_HEX:+&pinSHA256=${CERT_HEX}}#hy2_easyshare" >> "${FILE_PATH}/list.txt"
+fi
+
+if [ -n "$REALITY_PORT" ] && [ "$REALITY_PORT" != "0" ]; then
+  echo "vless://${UUID}@${IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.nazhumi.com&fp=firefox&pbk=${public_key}&type=tcp#reality_easyshare" >> "${FILE_PATH}/list.txt"
+fi
 
 base64 "${FILE_PATH}/list.txt" | tr -d '\n' > "${FILE_PATH}/sub.txt"
+echo -e "\e[1;32m====== 订阅链接 (list.txt) ======\e[0m"
 cat "${FILE_PATH}/list.txt"
-echo -e "\n\e[1;32m${FILE_PATH}/sub.txt 已保存\e[0m"
+echo -e "\n\e[1;32m[成功] ${FILE_PATH}/sub.txt 已保存\e[0m"
 
+# ---------- 定时重启逻辑 ----------
 schedule_restart() {
   echo "[定时重启:Sing-box] 已启动（北京时间 00:03）"
   LAST_RESTART_DAY=-1
@@ -216,15 +260,12 @@ schedule_restart() {
 
       kill "$SINGBOX_PID" 2>/dev/null || true
       sleep 3
-
       rm -rf ~/.npm/_logs/* ./npm-debug.log* "${DATA_PATH}"/* /tmp/.singbox_* 2>/dev/null || true
 
       "$SINGBOX_BIN" run -c "${FILE_PATH}/config.json" >/dev/null 2>&1 &
       SINGBOX_PID=$!
-
       echo "[Sing-box重启完成] 新 PID: $SINGBOX_PID"
     fi
-
     sleep 30
   done
 }
